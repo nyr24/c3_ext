@@ -1,0 +1,21 @@
+{
+  "langrev": "0.7.11",
+  "warnings": [ "no-unused" ],
+  "dependencies": [ ],
+  "authors": ["nyr24"],
+  "version": "1.0.0",
+  "sources": [ "src/**" ],
+  "test-sources": [ "test/**" ],
+  "build-dir": "build",
+  "output": "build",
+  "targets": {
+    "utils": {
+      "type": "static-lib",
+    },
+    "utils_dyn_lib": {
+      "type": "dynamic-lib",
+    },
+  },
+  "cpu": "generic",
+  "opt": "O0"
+}
