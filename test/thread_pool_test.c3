@@ -18,7 +18,9 @@ const String[*] FILE_NAMES = {
 fn void general() @test
 {
 	ThreadArena thread_alloc;
-	thread_alloc.init(mem, 1ull << 32);
+	thread_alloc.init(mem, 1ul << 16);
+
+	tmem = &thread_alloc;
 
 	const TASK_COUNT = 100;
 
@@ -60,7 +62,7 @@ fn void general() @test
 fn void await_test() @test
 {
 	ThreadArena thread_alloc;
-	thread_alloc.init(mem, 1ull << 32);
+	thread_alloc.init(mem, 1ul << 16);
 
 	const TASK_COUNT = FILE_NAMES.len;
 

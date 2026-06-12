@@ -4,7 +4,7 @@ import std::thread;
 // BUG: when task executed on the thread and wants to await, it goes infinite.
 // TODO: await on specific thread.
 
-const THREAD_TEMP_MEM_AMOUNT = 1 << 16; // 65kb
+const THREAD_TEMP_MEM_AMOUNT = 1 << 14; // 16kb
 
 struct ThreadTask
 {
@@ -211,10 +211,6 @@ fn int worker(void* arg) @local
 			self.mutex.unlock();
 			// Process the task.
 			task.func(task.arg);
-
-			// NOTE: TEMP
-			io::printn("Threadpool finished some task!");
-
 			self.cond_task_finished.broadcast();
 		}
 	};

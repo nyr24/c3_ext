@@ -4,8 +4,6 @@ import std::thread;
 // BUG: when task executed on the thread and wants to await, it goes infinite.
 // TODO: await on specific thread.
 
-const THREAD_TEMP_MEM_AMOUNT = 1 << 16; // 65kb
-
 struct ThreadTask
 {
 	ThreadFn func;
@@ -48,7 +46,7 @@ struct PoolData @private
 enum TaskPriority : (ThreadPriority thread_prio)
 {
 	// For IO / background tasks.
-	LOW { DEFAULT },
+	LOW  { DEFAULT },
 	// For computation-intensive, urgent tasks.
 	HIGH { REALTIME },
 }
@@ -90,6 +88,7 @@ struct ThreadCreateData @local
 	sz idx;
 	Allocator mem;
 	Allocator tmem;
+	sz temp_pool_mem_amount;
 }
 
 <*
@@ -99,6 +98,7 @@ fn void? ThreadPoolPrio.init(
 	&self,
 	Allocator thread_main_alloc = mem,
 	Allocator thread_temp_alloc = tmem,
+	sz temp_pool_mem_amount = 4096,
 	sz stack_size_low = 0,
 	sz stack_size_high = 0
 )
@@ -129,7 +129,7 @@ fn void? ThreadPoolPrio.init(
 
 	foreach (i, &thread : self.high_threads)
 	{
-		ThreadCreateData thread_data = { self, i, thread_main_alloc, thread_temp_alloc };
+		ThreadCreateData thread_data = { self, i, thread_main_alloc, thread_temp_alloc, temp_pool_mem_amount };
 		thread.create(&process_high_prio_task, &thread_data, { stack_size_high, TaskPriority.HIGH.thread_prio })!;
 		// The thread resources will be cleaned up when the thread exits.
 		thread.detach()!;
@@ -137,7 +137,7 @@ fn void? ThreadPoolPrio.init(
 
 	foreach (i, &thread : self.low_threads)
 	{
-		ThreadCreateData thread_data = { self, i, thread_main_alloc, thread_temp_alloc };
+		ThreadCreateData thread_data = { self, i, thread_main_alloc, thread_temp_alloc, temp_pool_mem_amount };
 		thread.create(&process_low_prio_task, &thread_data, { stack_size_low, TaskPriority.LOW.thread_prio })!;
 		// The thread resources will be cleaned up when the thread exits.
 		thread.detach()!;
@@ -337,13 +337,14 @@ fn int process_high_prio_task(void* arg) @local
 {
 	ThreadCreateData* thread_data = arg;
 	sz thread_idx                 = thread_data.idx;
-	ThreadPoolPrio* self              = thread_data.tpool;
+	ThreadPoolPrio* self          = thread_data.tpool;
 	PoolData* pool                = &self.high_pool;
+	sz temp_pool_mem_amount       = thread_data.temp_pool_mem_amount;
 
 	mem = thread_data.mem;
 	tmem = thread_data.tmem;
 
-	@pool_init(tmem, THREAD_TEMP_MEM_AMOUNT)
+	@pool_init(tmem, temp_pool_mem_amount)
 	{
 		while (true)
 		{
@@ -375,10 +376,6 @@ fn int process_high_prio_task(void* arg) @local
 			pool.mutex.unlock();
 			// Process the task.
 			task.func(task.arg);
-
-			// NOTE: TEMP
-			io::printn("Threadpool task finished (high prio)!");
-
 			pool.cond_task_finished.broadcast();
 		}
 	};
@@ -391,13 +388,14 @@ fn int process_low_prio_task(void* arg) @local
 {
 	ThreadCreateData* thread_data = arg;
 	sz thread_idx                 = thread_data.idx;
-	ThreadPoolPrio* self              = thread_data.tpool;
+	ThreadPoolPrio* self          = thread_data.tpool;
 	PoolData* pool                = &self.low_pool;
+	sz temp_pool_mem_amount       = thread_data.temp_pool_mem_amount;
 
 	mem = thread_data.mem;
 	tmem = thread_data.tmem;
 
-	@pool_init(tmem, THREAD_TEMP_MEM_AMOUNT)
+	@pool_init(tmem, temp_pool_mem_amount)
 	{
 		while (true)
 		{
@@ -429,10 +427,6 @@ fn int process_low_prio_task(void* arg) @local
 			pool.mutex.unlock();
 			// Process the task.
 			task.func(task.arg);
-
-			// NOTE: TEMP
-			io::printn("Threadpool task finished (low prio)!");
-			
 			pool.cond_task_finished.broadcast();
 		}
 	};

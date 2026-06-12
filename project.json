@@ -1,5 +1,5 @@
 {
-  "langrev": "0.7.11",
+  "langrev": "0.8.0",
   "warnings": [ "no-unused" ],
   "dependencies": [ ],
   "authors": ["nyr24"],
@@ -9,10 +9,10 @@
   "build-dir": "build",
   "output": "build",
   "targets": {
-    "utils": {
+    "c3_ext": {
       "type": "static-lib",
     },
-    "utils_dyn_lib": {
+    "c3_ext_dyn": {
       "type": "dynamic-lib",
     },
   },
