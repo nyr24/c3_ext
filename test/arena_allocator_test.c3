@@ -93,7 +93,7 @@ fn void test_map()
 	Allocator a = (Allocator)arena;
 
 	HashMap{String, int} m;
-	m.init(a, 8);
+	m.init(a);
 	defer m.free();
 
 	m.set("hello", 13);

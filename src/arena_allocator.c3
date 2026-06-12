@@ -1,8 +1,6 @@
 module ext::allocators::arena;
 import ext::collections::smart_slice;
 
-// TODO : store 'aligned_size_with_header' in the header.
-
 // Aliases for public use.
 alias Arena = ArenaAlloc{false};
 alias ThreadArena = ArenaAlloc{true};
@@ -17,9 +15,9 @@ import std::thread @norecurse;
 
 // Individual allocation structure: [header|payload|padding]
 
-const DEFAULT_INIT_CAPACITY  @local = 4096;
-const MIN_INIT_CAPACITY      @local = 512;
-const HEADER_SIZE            @local = allocators::DEFAULT_SIZE_PREFIX;
+const sz DEFAULT_INIT_CAPACITY  @local = 1ul << 14; // 16kb
+const sz MIN_INIT_CAPACITY      @local = 1ul << 9; // 512b
+const sz HEADER_SIZE            @local = allocators::DEFAULT_SIZE_PREFIX;
 
 struct ArenaAlloc (Allocator, Printable) @private
 {
@@ -36,6 +34,14 @@ struct ArenaAlloc (Allocator, Printable) @private
 		Atomic{sz} mark_count;
 	}
 	Allocator backing_alloc;
+	FallbackAlloc* fallback_root;
+	char[*] memory;
+}
+
+struct FallbackAlloc @local
+{
+	FallbackAlloc* next;
+	sz size;
 	char[*] memory;
 }
 
@@ -49,16 +55,9 @@ fn ArenaAlloc* create(
 	sz init_capacity = DEFAULT_INIT_CAPACITY,
 )
 {
-	ArenaAlloc* self = alloc::alloc_with_padding(backing_alloc, ArenaAlloc, init_capacity)!!;
-$if THREAD_SAFE:
-	self.capacity.store(init_capacity);
-	self.cursor.store(0);
-	self.mark_count.store(0);
-$else
-	self.capacity = init_capacity;
-	self.cursor = 0;
-	self.mark_count = 0;
-$endif
+	// Zero memory on init.
+	ArenaAlloc* self = alloc::new_with_padding(backing_alloc, ArenaAlloc, init_capacity)!!;
+	set_capacity(self, init_capacity);
 	self.backing_alloc = backing_alloc;
 	return self;
 }
@@ -79,16 +78,16 @@ fn void*? ArenaAlloc.acquire(&self, sz size, AllocInitType init_type, sz alignme
 
 $if THREAD_SAFE:
 	sz curr_cursor = cursor(self);
+	sz old_cursor = curr_cursor;
 	sz new_cursor @noinit;
-	sz remain @noinit;
 	
 	do
 	{
-		if (remain_mem(self, curr_cursor) < aligned_size_with_header) return self.backing_alloc.acquire(size, init_type, alignment);
+		if (remain_mem(self, curr_cursor) < aligned_size_with_header) return make_fallback_allocation(self, size, init_type);
 		new_cursor = curr_cursor + aligned_size_with_header;
 	} while (!self.cursor.compare_exchange(&curr_cursor, new_cursor));
 
-	char* start = (char*)&self.memory + new_cursor + HEADER_SIZE;
+	char* start = (char*)&self.memory + old_cursor + HEADER_SIZE;
 	char* ret = mem::aligned_pointer(start, alignment);
 	sz* header = (sz*)(ret - HEADER_SIZE);
 	*header = aligned_size;
@@ -265,6 +264,7 @@ fn void ArenaAlloc.reset(&self)
 *>
 fn void ArenaAlloc.free(&self)
 {
+	if (self.fallback_root) free_fallback_allocations(self);
 	alloc::free(self.backing_alloc, self);
 }
 
@@ -462,4 +462,94 @@ fn bool is_last_alloc(ArenaAlloc* self, sz cursor, void* ptr, sz alloc_size) @in
 {
 	sz alloc_cursor = ((char*)ptr + alloc_size) - (char*)&self.memory;
 	return alloc_cursor == cursor;
+}
+
+// --- Fallback allocations ---
+
+<*
+ Allocates to the separate linked list in case there's not enough space in the arena allocator main buffer.
+
+ @require size > 0 : "Should be bigger than 0"
+*>
+fn void*? make_fallback_allocation(ArenaAlloc* self, sz size, AllocInitType init_type) @local
+{
+	FallbackAlloc* curr = self.fallback_root;
+	while (curr)
+	{
+		curr = curr.next;
+	}
+	curr = alloc::alloc_with_padding(self.backing_alloc, FallbackAlloc, size)!;
+	curr.size = size;
+	curr.next = null;
+
+	if (!self.fallback_root)
+	{
+		self.fallback_root = curr;
+	}
+
+	if (init_type == ZERO)
+	{
+		mem::clear(&curr.memory, size);
+	}
+
+	return &curr.memory;
+}
+
+<*
+ Tries to find and resize allocation made as a fallback.
+
+ @require old_ptr != null : "Shouldn't be null"
+ @require new_size > 0 : "Should be bigger than 0"
+*>
+fn void*? resize_fallback_allocation(ArenaAlloc* self, void* old_ptr, sz new_size) @local
+{
+	FallbackAlloc* curr = self.fallback_root;
+	FallbackAlloc* alloc = null;
+
+	while (curr)
+	{
+		if (curr == old_ptr)
+		{
+			alloc = curr;
+			break;
+		}
+		curr = curr.next;
+	}
+
+	assert(alloc != null, "Pointer originates from a different allocator: %p, not in %p - %p", old_ptr, &self.memory, &self.memory + capacity(self));
+
+	alloc = alloc::realloc(self.backing_alloc, alloc, FallbackAlloc::size + new_size);
+	alloc.size = new_size;
+
+	return &alloc.memory;
+}
+
+<*
+ Cleans up all fallback allocations.
+*>
+fn void free_fallback_allocations(ArenaAlloc* self) @local
+{
+	FallbackAlloc* curr = self.fallback_root;
+	while (curr)
+	{
+		FallbackAlloc* next = curr.next;
+		alloc::free(self.backing_alloc, curr);
+		curr = next;
+	}
+	self.fallback_root = null;
+}
+
+<*
+ Calculates all memory that were allocated as a fallback.
+*>
+fn sz calc_used_fallback_mem(ArenaAlloc* self) @local
+{
+	sz res = 0;
+	FallbackAlloc* curr = self.fallback_root;
+	while (curr)
+	{
+		res += curr.size;
+		curr = curr.next;
+	}
+	return res;
 }
