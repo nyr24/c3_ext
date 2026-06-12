@@ -1,9 +1,6 @@
 module ext::collections::thread_pool;
 import std::thread;
 
-// BUG: when task executed on the thread and wants to await, it goes infinite.
-// TODO: await on specific thread.
-
 struct ThreadTask
 {
 	ThreadFn func;
@@ -64,16 +61,22 @@ const DEFAULT_TEMP_POOL_CAPACITY = 1ul << 16; // 65kb
 *>
 fn void? ThreadPool.init(&self, Allocator alloc = mem, sz task_queue_cap = DEFAULT_TASK_QUEUE_CAPACITY, sz temp_pool_capacity = DEFAULT_TEMP_POOL_CAPACITY, ThreadSettings thread_settings = { })
 {
-	defer catch self.destroy();
-
 	self.alive_thread_count = MAX_THREADS;
 	self.initialized = true;
 	self.mutex.init()!;
+	defer catch self.mutex.destroy();
 	self.cond_task_acquired.init()!;
+	defer catch self.cond_task_acquired.destroy();
 	self.cond_task_finished.init()!;
+	defer catch self.cond_task_finished.destroy();
 	self.cond_collect.init()!;
+	defer catch self.cond_collect.destroy();
+
 	self.queue.init(alloc, task_queue_cap);
+	defer catch self.queue.free();
 	self.threads_working = { };
+
+	defer catch self.stop = true;
 
 	foreach (i, &thread : self.threads)
 	{
@@ -92,13 +95,8 @@ fn void? ThreadPool.init(&self, Allocator alloc = mem, sz task_queue_cap = DEFAU
 *>
 fn void ThreadPool.await_all(&self)
 {
-	// NOTE: TEMP
-	io::printfn("await all (before): queue len: %s, working threads: %s", self.queue.len(), threads_working_count(self));
-
 	self.mutex.@in_lock()
 	{
-		// NOTE: TEMP
-		io::printfn("await all: queue len: %s, working threads: %s", self.queue.len(), threads_working_count(self));
 		while (!self.queue.is_empty() || threads_working_count(self))
 		{
 			self.cond_task_finished.wait(&self.mutex);
@@ -227,7 +225,7 @@ macro void @shutdown(ThreadPool* self, bool #stop_flag) @local
 		{
 			self.mutex.lock();
 			defer self.mutex.unlock();
-			if (!threads_idle_count(self) && !threads_idle_count(self))
+			if (!threads_idle_count(self))
 			{
 				break;
 			}
@@ -238,6 +236,7 @@ macro void @shutdown(ThreadPool* self, bool #stop_flag) @local
 		self.cond_task_finished.destroy();
 		self.cond_collect.destroy();
 		self.initialized = false;
+		self.queue.free();
 	}
 }
 
