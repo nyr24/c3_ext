@@ -59,7 +59,7 @@ const DEFAULT_TEMP_POOL_CAPACITY = 1ul << 16; // 65kb
 <*
  @require !self.is_initialized() : "Pools must not be already initialized"
 *>
-fn void? ThreadPool.init(&self, Allocator alloc = mem, sz task_queue_cap = DEFAULT_TASK_QUEUE_CAPACITY, sz temp_pool_capacity = DEFAULT_TEMP_POOL_CAPACITY, ThreadSettings thread_settings = { })
+fn void? ThreadPool.init(&self, Allocator alloc, sz task_queue_cap = DEFAULT_TASK_QUEUE_CAPACITY, sz temp_pool_capacity = DEFAULT_TEMP_POOL_CAPACITY, ThreadSettings thread_settings = { })
 {
 	self.alive_thread_count = MAX_THREADS;
 	self.initialized = true;
