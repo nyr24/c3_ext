@@ -1,9 +1,6 @@
 module ext::collections::thread_pool_prio;
 import std::thread;
 
-// BUG: when task executed on the thread and wants to await, it goes infinite.
-// TODO: await on specific thread.
-
 struct ThreadTask
 {
 	ThreadFn func;
@@ -153,7 +150,7 @@ fn void ThreadPoolPrio.await_all(&self)
 {
 	PoolData* pool = &self.high_pool;
 
-	pool.mutex.@lock_scope()
+	pool.mutex.@in_lock()
 	{
 		while (!self.high_queue.is_empty() || high_threads_working(self))
 		{
@@ -162,7 +159,7 @@ fn void ThreadPoolPrio.await_all(&self)
 	};
 
 	pool = &self.low_pool;
-	pool.mutex.@lock_scope()
+	pool.mutex.@in_lock()
 	{
 		while (!self.low_queue.is_empty() || low_threads_working(self))
 		{
@@ -209,7 +206,7 @@ fn void ThreadPoolPrio.await_with_priority(&self, TaskPriority priority)
 fn void ThreadPoolPrio.await_until_some_done_high_prio(&self) @inline
 {
 	PoolData* pool = &self.high_pool;
-	pool.mutex.@lock_scope()
+	pool.mutex.@in_lock()
 	{
 		if (high_threads_working(self))
 		{
@@ -227,7 +224,7 @@ fn void ThreadPoolPrio.await_until_some_done_high_prio(&self) @inline
 fn void ThreadPoolPrio.await_until_some_done_low_prio(&self) @inline
 {
 	PoolData* pool = &self.low_pool;
-	pool.mutex.@lock_scope()
+	pool.mutex.@in_lock()
 	{
 		pool.cond_task_finished.wait(&pool.mutex);
 	};

@@ -1,4 +1,4 @@
-module ext::custom_allocators::growing_arena;
+module ext::allocators::growing_arena;
 import ext::collections::smart_slice;
 
 // Aliases for public use.
@@ -20,7 +20,7 @@ struct GrowingArenaRegion @private
 	char[*] memory;
 }
 
-module ext::custom_allocators::growing_arena <THREAD_SAFE>;
+module ext::allocators::growing_arena <THREAD_SAFE>;
 import std::math;
 import std::io;
 import std::thread @norecurse;

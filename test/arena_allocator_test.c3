@@ -1,13 +1,13 @@
 module arena_test @test;
 
-import ext::custom_allocators::arena;
+import ext::allocators::arena;
 import std::collections::map;
 
 fn void temp_scope()
 {
-	Arena arena;
-	arena.init(mem);
+	Arena* arena = arena::create(mem);
 	defer arena.free();
+	Allocator a = arena;
 
 	arena.@temp_scope_alloc(; alloc)
 	{
@@ -31,10 +31,9 @@ fn void temp_scope()
 
 fn void map_test()
 {
-	Arena arena;
-	arena.init(mem);
+	Arena* arena = arena::create(mem);
 	defer arena.free();
-	Allocator a = &arena;
+	Allocator a = arena;
 	
 	HashMap{String, uint} map;
 	map.init(a);

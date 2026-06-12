@@ -1,6 +1,6 @@
 module buddy_test @test;
 
-import ext::custom_allocators::buddy;
+import ext::allocators::buddy;
 import std::collections::list;
 import std::collections::map;
 import std::math, std::io;

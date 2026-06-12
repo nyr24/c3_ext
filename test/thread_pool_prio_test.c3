@@ -1,6 +1,6 @@
 // module thread_pool_prio_test @test;
 // import ext::collections::thread_pool_prio;
-// import ext::custom_allocators::arena;
+// import ext::allocators::arena;
 // import std::math;
 // import std::time;
 // import std::io;
@@ -107,7 +107,7 @@
 // import std::time;
 // import std::math;
 // import std::io;
-// import ext::custom_allocators::arena;
+// import ext::allocators::arena;
 // import ext::collections::thread_pool_prio;
 // import std::atomic;
 

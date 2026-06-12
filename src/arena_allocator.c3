@@ -1,13 +1,15 @@
-module ext::custom_allocators::arena;
+module ext::allocators::arena;
 import ext::collections::smart_slice;
+
+// TODO : store 'aligned_size_with_header' in the header.
 
 // Aliases for public use.
 alias Arena = ArenaAlloc{false};
 alias ThreadArena = ArenaAlloc{true};
 
-typedef ArenaMark = sz;
+alias ArenaMark = sz;
 
-module ext::custom_allocators::arena <THREAD_SAFE>;
+module ext::allocators::arena <THREAD_SAFE>;
 import std::math;
 import std::io;
 import std::atomic;
@@ -21,7 +23,6 @@ const HEADER_SIZE            @local = allocators::DEFAULT_SIZE_PREFIX;
 
 struct ArenaAlloc (Allocator, Printable) @private
 {
-	char* memory;
 	struct @if(!THREAD_SAFE)
 	{
 		sz cursor;
@@ -35,7 +36,7 @@ struct ArenaAlloc (Allocator, Printable) @private
 		Atomic{sz} mark_count;
 	}
 	Allocator backing_alloc;
-	// Mutex mutex @if(THREAD_SAFE);
+	char[*] memory;
 }
 
 <*
@@ -43,13 +44,12 @@ struct ArenaAlloc (Allocator, Printable) @private
 
  @require init_capacity >= MIN_INIT_CAPACITY : "Should be bigger than minimum"
 *>
-fn void ArenaAlloc.init(
-	&self,
+fn ArenaAlloc* create(
 	Allocator backing_alloc = mem,
 	sz init_capacity = DEFAULT_INIT_CAPACITY,
 )
 {
-	self.memory = alloc::malloc(backing_alloc, init_capacity);
+	ArenaAlloc* self = alloc::alloc_with_padding(backing_alloc, ArenaAlloc, init_capacity)!!;
 $if THREAD_SAFE:
 	self.capacity.store(init_capacity);
 	self.cursor.store(0);
@@ -60,6 +60,7 @@ $else
 	self.mark_count = 0;
 $endif
 	self.backing_alloc = backing_alloc;
+	return self;
 }
 
 <*
@@ -132,7 +133,7 @@ $if THREAD_SAFE:
 	do
 	OUTER: {
 		bool last_alloc = is_last_alloc(self, curr_cursor, ptr, *old_size);
-		if (last_alloc && alloc_size_diff > remain_mem(self, cursor))
+		if (last_alloc && alloc_size_diff > remain_mem(self, curr_cursor))
 		{
 			// Extend allocation.
 			new_cursor = curr_cursor + alloc_size_diff;
@@ -154,7 +155,7 @@ $if THREAD_SAFE:
 			return ret;
 		}
 	} while (true);
-$endif
+$else
 	bool last_alloc = is_last_alloc(self, self.cursor, ptr, *old_size);
 	if (last_alloc && alloc_size_diff > remain_mem(self, self.cursor))
 	{
@@ -166,6 +167,7 @@ $endif
 	void* ret = self.acquire(new_size, NO_ZERO, alignment)!;
 	mem::copy((char*)ret, (char*)ptr, math::min(*old_size, new_size));
 	return ret;
+$endif
 }
 
 <*
@@ -259,150 +261,132 @@ fn void ArenaAlloc.reset(&self)
 <*
  Free all the memory storage of arena and return it to backing allocator.
 
- @require self.regions != null : "Should be initialized"
+ @require self != null : "Should be initialized"
 *>
 fn void ArenaAlloc.free(&self)
 {
-	if (self.memory)
-	{
-		set_cursor(self, 0);
-		set_capacity(self, 0);
-		alloc::free(self.backing_alloc, self.memory);
-		self.memory = null;
-	}
+	alloc::free(self.backing_alloc, self);
 }
 
-// <*
-//  Implements 'Printable' interface.
-// *>
-// fn sz? ArenaAlloc.to_format(&self, Formatter* fmt) @dynamic
-// {
-// $if THREAD_SAFE:
-// 	self.mutex.lock();
-// 	defer self.mutex.unlock();
-// $endif
-// 	sz total = fmt.print("Arena allocator info: [cursor : capacity]")!;
-// 	ArenaRegion* curr = self.regions;
-
-// 	while (curr)
-// 	{
-// 		fmt.printf("\n\t[%s : %s], remain: %s", curr.cursor, curr.capacity, remain_mem(curr))!;
-// 		curr = curr.next;
-// 	}
-
-// 	return total;
-// }
+<*
+ Implements 'Printable' interface.
+*>
+fn sz? ArenaAlloc.to_format(&self, Formatter* fmt) @dynamic
+{
+	sz total = fmt.printf("Arena allocator info: [cursor : capacity] : [%s : %s]", cursor(self), capacity(self))!;
+	return total;
+}
 
 // // Mimic std api without virtual function call overhead.
 
-// macro ArenaAlloc.alloc_array(&self, $Type, sz count) => _alloc_array{$Type, THREAD_SAFE}(self, count);
+macro ArenaAlloc.alloc_array(&self, $Type, sz count) => _alloc_array{$Type, THREAD_SAFE}(self, count);
 
-// fn AllocElemType[] _alloc_array(ArenaAlloc{THREAD_SAFE}* self, sz count) <AllocElemType, THREAD_SAFE>
-// {
-// 	sz size = AllocElemType::size * count;
-// 	return ((AllocElemType*)self.acquire(size, NO_ZERO)!!)[:count];
-// }
+fn AllocElemType[] _alloc_array(ArenaAlloc{THREAD_SAFE}* self, sz count) <AllocElemType, THREAD_SAFE>
+{
+	sz size = AllocElemType::size * count;
+	return ((AllocElemType*)self.acquire(size, NO_ZERO)!!)[:count];
+}
 
-// macro ArenaAlloc.new_array(&self, $Type, sz count) => _new_array{$Type, THREAD_SAFE}(self, count);
+macro ArenaAlloc.new_array(&self, $Type, sz count) => _new_array{$Type, THREAD_SAFE}(self, count);
 
-// fn AllocElemType[] _new_array(ArenaAlloc{THREAD_SAFE}* self, sz count) <AllocElemType, THREAD_SAFE>
-// {
-// 	sz size = AllocElemType::size * count;
-// 	return ((AllocElemType*)self.acquire(size, ZERO)!!)[:count];
-// }
+fn AllocElemType[] _new_array(ArenaAlloc{THREAD_SAFE}* self, sz count) <AllocElemType, THREAD_SAFE>
+{
+	sz size = AllocElemType::size * count;
+	return ((AllocElemType*)self.acquire(size, ZERO)!!)[:count];
+}
 
-// <*
-//  @require @kindof(old_slice) == SLICE : "Must be slice"
-// *>
-// macro ArenaAlloc.realloc_array(&self, old_slice, sz new_count) => _realloc_array{$Typeof(old_slice[0]), THREAD_SAFE}(self, old_slice, new_count);
+<*
+ @require @kindof(old_slice) == SLICE : "Must be slice"
+*>
+macro ArenaAlloc.realloc_array(&self, old_slice, sz new_count) => _realloc_array{$Typeof(old_slice[0]), THREAD_SAFE}(self, old_slice, new_count);
 
-// fn AllocElemType[] _realloc_array(ArenaAlloc{THREAD_SAFE}* self, AllocElemType[] old_slice, sz new_count) <AllocElemType, THREAD_SAFE>
-// {
-// 	sz new_size = AllocElemType::size * new_count;
-// 	return ((AllocElemType*)self.resize(old_slice.ptr, new_size)!!)[:new_count];
-// }
+fn AllocElemType[] _realloc_array(ArenaAlloc{THREAD_SAFE}* self, AllocElemType[] old_slice, sz new_count) <AllocElemType, THREAD_SAFE>
+{
+	sz new_size = AllocElemType::size * new_count;
+	return ((AllocElemType*)self.resize(old_slice.ptr, new_size)!!)[:new_count];
+}
 
-// macro ArenaAlloc.alloc_smart_array(&self, $Type, sz count) => _alloc_smart_array{$Type, THREAD_SAFE}(self, count);
+macro ArenaAlloc.alloc_smart_array(&self, $Type, sz count) => _alloc_smart_array{$Type, THREAD_SAFE}(self, count);
 
-// fn SmartSlice{AllocElemType} _alloc_smart_array(ArenaAlloc{THREAD_SAFE}* self, sz count) <AllocElemType, THREAD_SAFE>
-// {
-// 	SmartSlice{AllocElemType} res @noinit;
-// 	sz size = AllocElemType::size * count;
-// 	res.items = ((AllocElemType*)self.acquire(size, NO_ZERO)!!)[:count];
-// 	res.size = 0;
-// 	return res;
-// }
+fn SmartSlice{AllocElemType} _alloc_smart_array(ArenaAlloc{THREAD_SAFE}* self, sz count) <AllocElemType, THREAD_SAFE>
+{
+	SmartSlice{AllocElemType} res @noinit;
+	sz size = AllocElemType::size * count;
+	res.items = ((AllocElemType*)self.acquire(size, NO_ZERO)!!)[:count];
+	res.size = 0;
+	return res;
+}
 
-// macro ArenaAlloc.new_smart_array(&self, $Type, sz count) => _new_smart_array{$Type, THREAD_SAFE}(self, count);
+macro ArenaAlloc.new_smart_array(&self, $Type, sz count) => _new_smart_array{$Type, THREAD_SAFE}(self, count);
 
-// fn SmartSlice{AllocElemType} _new_smart_array(ArenaAlloc{THREAD_SAFE}* self, sz count) <AllocElemType, THREAD_SAFE>
-// {
-// 	SmartSlice{AllocElemType} res @noinit;
-// 	sz size = AllocElemType::size * count;
-// 	res.items = ((AllocElemType*)self.acquire(size, ZERO)!!)[:count];
-// 	res.size = 0;
-// 	return res;
-// }
+fn SmartSlice{AllocElemType} _new_smart_array(ArenaAlloc{THREAD_SAFE}* self, sz count) <AllocElemType, THREAD_SAFE>
+{
+	SmartSlice{AllocElemType} res @noinit;
+	sz size = AllocElemType::size * count;
+	res.items = ((AllocElemType*)self.acquire(size, ZERO)!!)[:count];
+	res.size = 0;
+	return res;
+}
 
-// macro ArenaAlloc.realloc_smart_array(&self, old_arr, sz new_count) => _realloc_smart_array{$Typeof(old_arr.items[0]), THREAD_SAFE}(self, old_arr, new_count);
+macro ArenaAlloc.realloc_smart_array(&self, old_arr, sz new_count) => _realloc_smart_array{$Typeof(old_arr.items[0]), THREAD_SAFE}(self, old_arr, new_count);
 
-// fn SmartSlice{AllocElemType} _realloc_smart_array(ArenaAlloc{THREAD_SAFE}* self, SmartSlice{AllocElemType} old_arr, sz new_count) <AllocElemType, THREAD_SAFE>
-// {
-// 	SmartSlice{AllocElemType} res @noinit;
-// 	sz new_size = AllocElemType::size * new_count;
-// 	res.items = ((AllocElemType*)self.resize(old_arr.items.ptr, new_size)!!)[:new_count];
-// 	res.size = new_count;
-// 	return res;
-// }
+fn SmartSlice{AllocElemType} _realloc_smart_array(ArenaAlloc{THREAD_SAFE}* self, SmartSlice{AllocElemType} old_arr, sz new_count) <AllocElemType, THREAD_SAFE>
+{
+	SmartSlice{AllocElemType} res @noinit;
+	sz new_size = AllocElemType::size * new_count;
+	res.items = ((AllocElemType*)self.resize(old_arr.items.ptr, new_size)!!)[:new_count];
+	res.size = new_count;
+	return res;
+}
 
-// fn void* ArenaAlloc.malloc(&self, sz size)
-// {
-// 	return self.acquire(size, NO_ZERO)!!;
-// }
+fn void* ArenaAlloc.malloc(&self, sz size)
+{
+	return self.acquire(size, NO_ZERO)!!;
+}
 
-// fn void* ArenaAlloc.calloc(&self, sz size)
-// {
-// 	return self.acquire(size, ZERO)!!;
-// }
+fn void* ArenaAlloc.calloc(&self, sz size)
+{
+	return self.acquire(size, ZERO)!!;
+}
 
-// fn void* ArenaAlloc.realloc(&self, void* ptr, sz new_size)
-// {
-// 	return self.resize(ptr, new_size)!!;
-// }
+fn void* ArenaAlloc.realloc(&self, void* ptr, sz new_size)
+{
+	return self.resize(ptr, new_size)!!;
+}
 
-// // Only for compatibility reasons and external interfacing with C.
-// fn void* ArenaAlloc.c_realloc(&self, void* ptr, sz new_size)
-// {
-// 	if (!ptr)
-// 	{
-// 		return self.malloc(new_size);
-// 	}
-// 	else if (new_size == 0)
-// 	{
-// 		// We don't want free on arenas, just use temp_scope.
-// 		return null;
-// 	}
-// 	return _realloc(self, ptr, new_size)!!;
-// }
+// Only for compatibility reasons and external interfacing with C.
+fn void* ArenaAlloc.c_realloc(&self, void* ptr, sz new_size)
+{
+	if (!ptr)
+	{
+		return self.malloc(new_size);
+	}
+	else if (new_size == 0)
+	{
+		// We don't want free on arenas, just use temp_scope.
+		return null;
+	}
+	return self.resize(ptr, new_size)!!;
+}
 
-// macro ArenaAlloc.alloc(&self, $Type) => _alloc{$Type, THREAD_SAFE}(self);
+macro ArenaAlloc.alloc(&self, $Type) => _alloc{$Type, THREAD_SAFE}(self);
 
-// fn AllocType* _alloc(ArenaAlloc{THREAD_SAFE}* self) <AllocType, THREAD_SAFE> @local
-// {
-// 	return self.acquire(AllocType::size, NO_ZERO)!!;
-// }
+fn AllocType* _alloc(ArenaAlloc{THREAD_SAFE}* self) <AllocType, THREAD_SAFE> @local
+{
+	return self.acquire(AllocType::size, NO_ZERO)!!;
+}
 
-// <*
-//  @require @kindof(val) != POINTER : "Should pass by value"
-// *>
-// macro ArenaAlloc.clone(&self, val) => _clone{$Typeof(val), THREAD_SAFE}(self, val);
+<*
+ @require @kindof(val) != POINTER : "Should pass by value"
+*>
+macro ArenaAlloc.clone(&self, val) => _clone{$Typeof(val), THREAD_SAFE}(self, val);
 
-// fn CloneType* _clone(ArenaAlloc{THREAD_SAFE}* self, CloneType val) <CloneType, THREAD_SAFE> @local
-// {
-// 	CloneType* res = self.alloc(CloneType);
-// 	*res = val;
-// 	return res;
-// }
+fn CloneType* _clone(ArenaAlloc{THREAD_SAFE}* self, CloneType val) <CloneType, THREAD_SAFE> @local
+{
+	CloneType* res = self.alloc(CloneType);
+	*res = val;
+	return res;
+}
 
 // // ------ Private API ------
 

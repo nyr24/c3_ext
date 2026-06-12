@@ -1,6 +1,6 @@
 module bst_test @test;
 
-import ext::custom_allocators::bst;
+import ext::allocators::bst;
 import std::io;
 import std::collections::list;
 import std::collections::map;

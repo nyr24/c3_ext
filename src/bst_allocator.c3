@@ -1,10 +1,10 @@
-module ext::custom_allocators::bst;
+module ext::allocators::bst;
 
 // Aliases for public use.
 alias BstAllocator = BstAlloc{false};
 alias ThreadBstAllocator = BstAlloc{true};
 
-module ext::custom_allocators::bst <THREAD_SAFE>;
+module ext::allocators::bst <THREAD_SAFE>;
 import std::io;
 import std::math;
 import std::thread @norecurse;

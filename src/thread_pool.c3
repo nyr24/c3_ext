@@ -4,12 +4,11 @@ import std::thread;
 // BUG: when task executed on the thread and wants to await, it goes infinite.
 // TODO: await on specific thread.
 
-const THREAD_TEMP_MEM_AMOUNT = 1 << 14; // 16kb
-
 struct ThreadTask
 {
 	ThreadFn func;
 	void* arg;
+	Allocator alloc;
 }
 
 alias ThreadFn = fn void(void* task_data);
@@ -21,7 +20,7 @@ module ext::collections::thread_pool <MAX_THREADS, MAX_TASKS>;
 import std::thread @norecurse;
 import std::math @norecurse;
 import std::io @norecurse;
-import std::collections::ringbuffer;
+import std::collections::deque;
 import std::collections::bitset;
 
 <*
@@ -40,7 +39,7 @@ struct ThreadPool
 		bool stop_now : 2..2;
 		sz alive_thread_count : 3..(bitsizeof(sz) - 1);
 	}
-	RingBuffer{ThreadTask, MAX_TASKS} queue;
+	Deque{ThreadTask} queue;
 	Thread[MAX_THREADS] threads;
 	BitSet{MAX_THREADS} threads_working;
 }
@@ -53,19 +52,17 @@ struct ThreadCreateData @local
 	ThreadPool* tpool;
 	// Corresponds to 'threads_working' states array
 	sz idx;
-	Allocator mem;
-	Allocator tmem;
+	sz temp_pool_capacity;
+	Allocator alloc;
 }
+
+const DEFAULT_TASK_QUEUE_CAPACITY = 64;
+const DEFAULT_TEMP_POOL_CAPACITY = 1ul << 16; // 65kb
 
 <*
  @require !self.is_initialized() : "Pools must not be already initialized"
 *>
-fn void? ThreadPool.init(
-	&self,
-	Allocator thread_main_alloc = mem,
-	Allocator thread_temp_alloc = tmem,
-	ThreadSettings thread_settings = {},
-)
+fn void? ThreadPool.init(&self, Allocator alloc = mem, sz task_queue_cap = DEFAULT_TASK_QUEUE_CAPACITY, sz temp_pool_capacity = DEFAULT_TEMP_POOL_CAPACITY, ThreadSettings thread_settings = { })
 {
 	defer catch self.destroy();
 
@@ -75,14 +72,12 @@ fn void? ThreadPool.init(
 	self.cond_task_acquired.init()!;
 	self.cond_task_finished.init()!;
 	self.cond_collect.init()!;
-
-	self.queue.init();
-
+	self.queue.init(alloc, task_queue_cap);
 	self.threads_working = { };
 
 	foreach (i, &thread : self.threads)
 	{
-		ThreadCreateData thread_data = { self, i, thread_main_alloc, thread_temp_alloc };
+		ThreadCreateData thread_data = { self, i, temp_pool_capacity, alloc };
 		thread.create(&worker, &thread_data, thread_settings)!;
 		// The thread resources will be cleaned up when the thread exits.
 		thread.detach()!;
@@ -97,8 +92,13 @@ fn void? ThreadPool.init(
 *>
 fn void ThreadPool.await_all(&self)
 {
-	self.mutex.@lock_scope()
+	// NOTE: TEMP
+	io::printfn("await all (before): queue len: %s, working threads: %s", self.queue.len(), threads_working_count(self));
+
+	self.mutex.@in_lock()
 	{
+		// NOTE: TEMP
+		io::printfn("await all: queue len: %s, working threads: %s", self.queue.len(), threads_working_count(self));
 		while (!self.queue.is_empty() || threads_working_count(self))
 		{
 			self.cond_task_finished.wait(&self.mutex);
@@ -127,19 +127,10 @@ fn void ThreadPool.submit_task(&self, ThreadTask task)
 {
 	bool pushed = false;
 
-	self.mutex.@lock_scope()
+	self.mutex.@in_lock()
 	{
-		while (true)
-		{
-			pushed = self.queue.push_safe(task);
-			// Signal to the threads that work is available.
-			if (pushed)
-			{
-				self.cond_task_acquired.broadcast();
-				return;
-			}
-			self.cond_task_finished.wait(&self.mutex);
-		}
+		self.queue.push(task);
+		self.cond_task_acquired.broadcast();
 	};
 }
 
@@ -151,19 +142,11 @@ fn void ThreadPool.submit_task_many(&self, ThreadTask[] tasks)
 	ThreadTask[] remain_tasks = tasks;
 	sz old_len @noinit;
 
-	self.mutex.@lock_scope()
+	self.mutex.@in_lock()
 	{
-		while (remain_tasks.len)
-		{
-			old_len = remain_tasks.len;
-			remain_tasks = self.queue.push_all_safe(remain_tasks);
-			if (remain_tasks.len < old_len)
-			{
-				self.cond_task_acquired.broadcast();
-				if (remain_tasks.len == 0) return;
-			}
-			self.cond_task_finished.wait(&self.mutex);
-		}
+		self.queue.push_all(remain_tasks);
+		self.cond_task_acquired.broadcast();
+		return;
 	};
 }
 
@@ -176,10 +159,7 @@ fn int worker(void* arg) @local
 	sz thread_idx                 = thread_data.idx;
 	ThreadPool* self              = thread_data.tpool;
 
-	mem = thread_data.mem;
-	tmem = thread_data.tmem;
-
-	@pool_init(tmem, THREAD_TEMP_MEM_AMOUNT)
+	@pool_init(thread_data.alloc, thread_data.temp_pool_capacity)
 	{
 		while (true)
 		{
@@ -210,7 +190,7 @@ fn int worker(void* arg) @local
 			self.threads_working[thread_idx] = true;
 			self.mutex.unlock();
 			// Process the task.
-			task.func(task.arg);
+			task.func(&task);
 			self.cond_task_finished.broadcast();
 		}
 	};

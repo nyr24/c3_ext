@@ -1,4 +1,4 @@
-module ext;
+module ext::util;
 
 import std::time;
 import std::io;
@@ -120,7 +120,7 @@ fn bool _array_check_uniq(CheckUniqItem[] arr) <CheckUniqItem> @local
  @require types::is_int($Typeof(value)) : "Must be an int"
  @require types::is_int($Typeof(boundary)) : "Must be an int"
 *>
-macro wrap_inc(value, boundary)
+macro wrap_inc(value, boundary) @builtin
 {
 	return value == boundary - 1 ? 0 : value + 1;
 }

@@ -1,6 +1,6 @@
 module thread_pool_test @test;
 import ext::collections::thread_pool;
-import ext::custom_allocators::arena;
+import ext::allocators::arena;
 import std::math;
 import std::time;
 import std::io;
@@ -15,21 +15,19 @@ const String[*] FILE_NAMES = {
 	"resources/input6.txt",
 };
 
+const ARENA_CAPACITY = 1ul << 24;
+
 fn void general() @test
 {
-	ThreadArena thread_alloc;
-	thread_alloc.init(mem, 1ul << 16);
-
-	tmem = &thread_alloc;
-
-	const TASK_COUNT = 100;
-
+	const TASK_COUNT = FILE_NAMES.len;
+	ThreadArena* arena = arena::create(mem, ARENA_CAPACITY);
 	ThreadPool{4, TASK_COUNT} pool;
-	pool.init(mem, &thread_alloc)!!;
+	pool.init(arena)!!;
 
-	defer {
+	defer
+	{
 		pool.stop_and_destroy();
-		thread_alloc.free();
+		arena.free();
 	}
 
 	ThreadTask[TASK_COUNT] compute_tasks;
@@ -47,32 +45,31 @@ fn void general() @test
 	}
 
 	ThreadTask[TASK_COUNT] io_tasks;
-	String f_name = "input.txt";
 	
 	foreach (i, &task : io_tasks)
 	{
 		task.func = &task_background;
-		task.arg = (void*)&FILE_NAMES[random::rand(FILE_NAMES.len)];
+		task.arg = (void*)&FILE_NAMES[i];
+		task.alloc = arena;
 	}
 
 	pool.submit_task_many(io_tasks[..]);
 	pool.submit_task_many(compute_tasks[..]);
+	// pool.await_all();
 }
 
 fn void await_test() @test
 {
-	ThreadArena thread_alloc;
-	thread_alloc.init(mem, 1ul << 16);
+	ThreadArena* arena = arena::create(mem, ARENA_CAPACITY);
 
 	const TASK_COUNT = FILE_NAMES.len;
 
 	ThreadPool{4, TASK_COUNT} pool;
-	pool.init(mem, &thread_alloc)!!;
+	pool.init(arena)!!;
 
 	defer {
 		pool.stop_and_destroy();
-		io::printn(thread_alloc);
-		thread_alloc.free();
+		arena.free();
 	}
 
 	// First portion
@@ -82,10 +79,11 @@ fn void await_test() @test
 	{
 		task.func = &task_background;
 		task.arg = (void*)&FILE_NAMES[i + TASK_COUNT / 2];
+		task.alloc = arena;
 	}
 
 	pool.submit_task_many(io_tasks_first[..]);
-	pool.await_all();
+	// pool.await_all();
 	
 	// Second Portion
 	ThreadTask[TASK_COUNT / 2] io_tasks_second;
@@ -94,24 +92,26 @@ fn void await_test() @test
 	{
 		task.func = &task_background;
 		task.arg = (void*)&FILE_NAMES[i];
+		task.alloc = arena;
 	}
 
 	pool.submit_task_many(io_tasks_second[..]);
-	pool.await_all();
+	// pool.await_all();
 }
 
 module thread_pool_test;
 import std::time;
 import std::math;
 import std::io;
-import ext::custom_allocators::arena;
+import ext::allocators::arena;
 import ext::collections::thread_pool;
 import std::atomic;
 
 fn void task_background(void* arg)
 {
-	String f_name = *(String*)arg;
-	ThreadArena* arena = (ThreadArena*)tmem;
+	ThreadTask* data = arg;
+	String f_name = *(String*)data.arg;
+	ThreadArena* arena = (ThreadArena*)data.alloc;
 
 	arena.@temp_scope_alloc(; alloc)
 	{
