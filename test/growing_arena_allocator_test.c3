@@ -1,14 +1,12 @@
-module arena_test @test;
+module growing_arena_test @test;
 
-import ext::allocators::arena;
-import ext::collections::smart_slice;
+import ext::allocators::growing_arena;
 import std::collections::map;
 import std::collections::list;
-import std::io @norecurse;
 
 fn void sequential_alloc_free()
 {
-	ThreadArena* arena = arena::create(mem);
+	ThreadGrowingArena* arena = growing_arena::create(mem);
 	defer arena.free();
 	Allocator a = (Allocator)arena;
 
@@ -36,7 +34,7 @@ fn void sequential_alloc_free()
 
 fn void mem_zero()
 {
-	ThreadArena* arena = arena::create(mem);
+	ThreadGrowingArena* arena = growing_arena::create(mem);
 	defer arena.free();
 	Allocator a = (Allocator)arena;
 
@@ -64,7 +62,7 @@ fn void mem_zero()
 
 fn void test_list()
 {
-	ThreadArena* arena = arena::create(mem);
+	ThreadGrowingArena* arena = growing_arena::create(mem);
 	defer arena.free();
 	Allocator a = (Allocator)arena;
 
@@ -90,7 +88,7 @@ fn void test_list()
 
 fn void test_map()
 {
-	ThreadArena* arena = arena::create(mem);
+	ThreadGrowingArena* arena = growing_arena::create(mem);
 	defer arena.free();
 	Allocator a = (Allocator)arena;
 
@@ -116,7 +114,7 @@ fn void test_map()
 
 fn void test_dstring()
 {
-	ThreadArena* arena = arena::create(mem);
+	ThreadGrowingArena* arena = growing_arena::create(mem);
 	defer arena.free();
 	Allocator a = (Allocator)arena;
 
@@ -147,7 +145,7 @@ fn void test_dstring()
 
 fn void temp_scope()
 {
-	Arena* arena = arena::create(mem);
+	GrowingArena* arena = growing_arena::create(mem);
 	defer arena.free();
 	Allocator a = arena;
 
@@ -173,7 +171,7 @@ fn void temp_scope()
 
 fn void test_aligned_allocations()
 {
-	Arena* arena = arena::create(mem);
+	GrowingArena* arena = growing_arena::create(mem);
 	defer arena.free();
 	Allocator a = arena;
 
@@ -213,7 +211,7 @@ fn void test_aligned_allocations()
 
 fn void single_alloc_filling_entire_buf()
 {
-	Arena* arena = arena::create(mem);
+	GrowingArena* arena = growing_arena::create(mem);
 	defer arena.free();
 	Allocator a = arena;
 
@@ -227,23 +225,9 @@ fn void single_alloc_filling_entire_buf()
 	alloc::free(a, a1);
 }
 
-
-fn void smart_slice_test()
-{
-	Arena* arena = arena::create(mem);
-	defer arena.free();
-
-	SmartSlice{int} arr = arena.alloc_smart_array(int, 10);
-	arr.push(1);
-	arr.push(2);
-	arr.push(3);
-	arr.push(4);
-	arr.push(5);
-}
-
 // Helpers
 
-module arena_test;
+module growing_arena_test;
 import std::math::random;
 import std::io;
 
@@ -276,3 +260,4 @@ fn void log_alloc(char[] alloc, String name = "unknown")
 	}
 	io::printn();
 }
+

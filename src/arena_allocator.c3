@@ -1,5 +1,4 @@
 module ext::allocators::arena;
-import ext::collections::smart_slice;
 
 // Aliases for public use.
 alias Arena = ArenaAlloc{false};
@@ -11,13 +10,14 @@ module ext::allocators::arena <THREAD_SAFE>;
 import std::math;
 import std::io;
 import std::atomic;
+import ext::collections::smart_slice;
 import std::thread @norecurse;
 
 // Individual allocation structure: [header|payload|padding]
 
-const sz DEFAULT_INIT_CAPACITY  @local = 1ul << 14; // 16kb
-const sz MIN_INIT_CAPACITY      @local = 1ul << 9; // 512b
-const sz HEADER_SIZE            @local = allocators::DEFAULT_SIZE_PREFIX;
+const sz DEFAULT_INIT_CAPACITY @local = 1ul << 14; // 16kb
+const sz MIN_INIT_CAPACITY @local     = 1ul << 9;  // 512b
+const sz HEADER_SIZE @local           = allocators::DEFAULT_SIZE_PREFIX;
 
 struct ArenaAlloc (Allocator, Printable) @private
 {
@@ -50,14 +50,12 @@ struct FallbackAlloc @local
 
  @require init_capacity >= MIN_INIT_CAPACITY : "Should be bigger than minimum"
 *>
-fn ArenaAlloc* create(
-	Allocator backing_alloc = mem,
-	sz init_capacity = DEFAULT_INIT_CAPACITY,
-)
+fn ArenaAlloc* create(Allocator backing_alloc, sz init_capacity = DEFAULT_INIT_CAPACITY,)
 {
-	// Zero memory on init.
-	ArenaAlloc* self = alloc::new_with_padding(backing_alloc, ArenaAlloc, init_capacity)!!;
+	ArenaAlloc* self = alloc::alloc_with_padding(backing_alloc, ArenaAlloc, init_capacity)!!;
+	set_cursor(self, 0);
 	set_capacity(self, init_capacity);
+	self.fallback_root = null;
 	self.backing_alloc = backing_alloc;
 	return self;
 }
@@ -74,40 +72,42 @@ fn void*? ArenaAlloc.acquire(&self, sz size, AllocInitType init_type, sz alignme
 {
 	alignment = allocators::alignment_for_allocation(alignment);
 	sz aligned_size_with_header = mem::aligned_offset(alignment + HEADER_SIZE + size, mem::DEFAULT_MEM_ALIGNMENT);
-	sz aligned_size = aligned_size_with_header - HEADER_SIZE;
+	sz aligned_size             = aligned_size_with_header - HEADER_SIZE;
 
-$if THREAD_SAFE:
-	sz curr_cursor = cursor(self);
-	sz old_cursor = curr_cursor;
-	sz new_cursor @noinit;
-	
-	do
-	{
-		if (remain_mem(self, curr_cursor) < aligned_size_with_header) return make_fallback_allocation(self, size, init_type);
-		new_cursor = curr_cursor + aligned_size_with_header;
-	} while (!self.cursor.compare_exchange(&curr_cursor, new_cursor));
+	$if THREAD_SAFE:
+		sz curr_cursor = cursor(self);
+		sz old_cursor  = curr_cursor;
+		sz new_cursor @noinit;
+		sz remain @noinit;
 
-	char* start = (char*)&self.memory + old_cursor + HEADER_SIZE;
-	char* ret = mem::aligned_pointer(start, alignment);
-	sz* header = (sz*)(ret - HEADER_SIZE);
-	*header = aligned_size;
-	if (init_type == ZERO)
-	{
-		mem::clear(ret, aligned_size);
-	}
-	return ret;
-$else
-	char* start = (char*)&self.memory + self.cursor + HEADER_SIZE;
-	char* ret = mem::aligned_pointer(start, alignment);
-	sz* header = (sz*)(ret - HEADER_SIZE);
-	*header = aligned_size;
-	self.cursor += aligned_size_with_header;
-	if (init_type == ZERO)
-	{
-		mem::clear(ret, aligned_size);
-	}
-	return ret;
-$endif
+		do
+		{
+			remain = remain_mem(self, curr_cursor);
+			if (remain < aligned_size_with_header) return make_fallback_allocation(self, size, init_type);
+			new_cursor = curr_cursor + aligned_size_with_header;
+		} while (!self.cursor.compare_exchange(&curr_cursor, new_cursor));
+
+		char* start = (char*)&self.memory + old_cursor + HEADER_SIZE;
+		char* ret   = mem::aligned_pointer(start, alignment);
+		sz* header  = (sz*)(ret - HEADER_SIZE);
+		*header = aligned_size;
+		if (init_type == ZERO)
+		{
+			mem::clear(ret, aligned_size);
+		}
+		return ret;
+	$else
+		char* start = (char*)&self.memory + self.cursor + HEADER_SIZE;
+		char* ret   = mem::aligned_pointer(start, alignment);
+		sz* header  = (sz*)(ret - HEADER_SIZE);
+		*header = aligned_size;
+		self.cursor += aligned_size_with_header;
+		if (init_type == ZERO)
+		{
+			mem::clear(ret, aligned_size);
+		}
+		return ret;
+	$endif
 }
 
 <*
@@ -122,51 +122,51 @@ $endif
 fn void*? ArenaAlloc.resize(&self, void* ptr, sz new_size, sz alignment = 0) @dynamic
 {
 	sz aligned_new_size = mem::aligned_offset(new_size, mem::DEFAULT_MEM_ALIGNMENT);
-	sz* old_size = (sz*)((char*)ptr - HEADER_SIZE);
-	sz alloc_size_diff = aligned_new_size - *old_size;
+	sz* old_size        = (sz*)((char*)ptr - HEADER_SIZE);
+	sz alloc_size_diff  = aligned_new_size - *old_size;
 
-$if THREAD_SAFE:
-	sz curr_cursor = self.cursor.load();
-	sz new_cursor @noinit;
+	$if THREAD_SAFE:
+		sz curr_cursor = self.cursor.load();
+		sz new_cursor @noinit;
 
-	do
-	OUTER: {
-		bool last_alloc = is_last_alloc(self, curr_cursor, ptr, *old_size);
-		if (last_alloc && alloc_size_diff > remain_mem(self, curr_cursor))
+		do OUTER:
 		{
-			// Extend allocation.
-			new_cursor = curr_cursor + alloc_size_diff;
-			if (self.cursor.compare_exchange(&curr_cursor, new_cursor))
+			bool last_alloc = is_last_alloc(self, curr_cursor, ptr, *old_size);
+			if (last_alloc && alloc_size_diff <= remain_mem(self, curr_cursor))
 			{
-				*old_size = aligned_new_size;
-				return ptr;
+				// Extend allocation.
+				new_cursor = curr_cursor + alloc_size_diff;
+				if (self.cursor.compare_exchange(&curr_cursor, new_cursor))
+				{
+					*old_size = aligned_new_size;
+					return ptr;
+				}
+				else
+				{
+					continue OUTER;
+				}
 			}
 			else
 			{
-				continue OUTER;
+				// Do fresh allocation.
+				void* ret = self.acquire(new_size, NO_ZERO, alignment)!;
+				mem::copy((char*)ret, (char*)ptr, math::min(*old_size, new_size));
+				return ret;
 			}
-		}
-		else
+		} while (true);
+	$else
+		bool last_alloc = is_last_alloc(self, self.cursor, ptr, *old_size);
+		if (last_alloc && alloc_size_diff <= remain_mem(self, self.cursor))
 		{
-			// Do fresh allocation.
-			void* ret = self.acquire(new_size, NO_ZERO, alignment)!;
-			mem::copy((char*)ret, (char*)ptr, math::min(*old_size, new_size));
-			return ret;
+			// Extend allocation.
+			self.cursor += alloc_size_diff;
+			return ptr;
 		}
-	} while (true);
-$else
-	bool last_alloc = is_last_alloc(self, self.cursor, ptr, *old_size);
-	if (last_alloc && alloc_size_diff > remain_mem(self, self.cursor))
-	{
-		// Extend allocation.
-		self.cursor += alloc_size_diff;
-		return ptr;
-	}
-	// Do fresh allocation.
-	void* ret = self.acquire(new_size, NO_ZERO, alignment)!;
-	mem::copy((char*)ret, (char*)ptr, math::min(*old_size, new_size));
-	return ret;
-$endif
+		// Do fresh allocation.
+		void* ret = self.acquire(new_size, NO_ZERO, alignment)!;
+		mem::copy((char*)ret, (char*)ptr, math::min(*old_size, new_size));
+		return ret;
+	$endif
 }
 
 <*
@@ -178,25 +178,25 @@ $endif
 *>
 fn void ArenaAlloc.release(&self, void* ptr, bool) @dynamic
 {
-$if THREAD_SAFE:
-	sz* alloc_size = (sz*)(ptr - HEADER_SIZE);
-	sz expected_cursor = cursor(self);
-	sz old_cursor = expected_cursor;
-	if (!is_last_alloc(self, expected_cursor, ptr, *alloc_size))
-	{
-		return;
-	}
-	sz new_cursor = old_cursor - (sz)(*alloc_size + HEADER_SIZE);
-	if (self.cursor.compare_exchange(&expected_cursor, new_cursor)) return;
-	self.cursor.store(math::min(expected_cursor, new_cursor));
-$else
-	sz* alloc_size = (sz*)(ptr - HEADER_SIZE);
-	if (!is_last_alloc(self, self.cursor, ptr, *alloc_size))
-	{
-		return;
-	}
-	self.cursor -= (sz)(*alloc_size + HEADER_SIZE);
-$endif
+	$if THREAD_SAFE:
+		sz* alloc_size     = (sz*)(ptr - HEADER_SIZE);
+		sz expected_cursor = cursor(self);
+		sz old_cursor      = expected_cursor;
+		if (!is_last_alloc(self, expected_cursor, ptr, *alloc_size))
+		{
+			return;
+		}
+		sz new_cursor = old_cursor - (sz)(*alloc_size + HEADER_SIZE);
+		if (self.cursor.compare_exchange(&expected_cursor, new_cursor)) return;
+		self.cursor.store(math::min(expected_cursor, new_cursor));
+	$else
+		sz* alloc_size = (sz*)(ptr - HEADER_SIZE);
+		if (!is_last_alloc(self, self.cursor, ptr, *alloc_size))
+		{
+			return;
+		}
+		self.cursor -= (sz)(*alloc_size + HEADER_SIZE);
+	$endif
 }
 
 <*
@@ -206,11 +206,11 @@ $endif
 fn ArenaMark ArenaAlloc.save_mark(&self)
 {
 	ArenaMark mark = cursor(self);
-$if THREAD_SAFE:
-	self.mark_count.add(1);
-$else
-	self.mark_count++;
-$endif
+	$if THREAD_SAFE:
+		self.mark_count.add(1);
+	$else
+		self.mark_count++;
+	$endif
 	return mark;
 }
 
@@ -219,13 +219,13 @@ $endif
 *>
 fn void ArenaAlloc.rewind_mark(&self, ArenaMark mark)
 {
-$if THREAD_SAFE:
-	self.cursor.store(mark);
-	self.mark_count.sub(1);
-$else
-	self.cursor = mark;
-	self.mark_count--;
-$endif
+	$if THREAD_SAFE:
+		self.cursor.store(mark);
+		self.mark_count.sub(1);
+	$else
+		self.cursor = mark;
+		self.mark_count--;
+	$endif
 }
 
 <*
@@ -264,8 +264,12 @@ fn void ArenaAlloc.reset(&self)
 *>
 fn void ArenaAlloc.free(&self)
 {
-	if (self.fallback_root) free_fallback_allocations(self);
-	alloc::free(self.backing_alloc, self);
+	if (self)
+	{
+		if (self.fallback_root) free_fallback_allocations(self);
+		alloc::free(self.backing_alloc, self);
+		self = null;
+	}
 }
 
 <*
@@ -281,7 +285,7 @@ fn sz? ArenaAlloc.to_format(&self, Formatter* fmt) @dynamic
 
 macro ArenaAlloc.alloc_array(&self, $Type, sz count) => _alloc_array{$Type, THREAD_SAFE}(self, count);
 
-fn AllocElemType[] _alloc_array(ArenaAlloc{THREAD_SAFE}* self, sz count) <AllocElemType, THREAD_SAFE>
+fn AllocElemType[] _alloc_array(ArenaAlloc{THREAD_SAFE}* self, sz count)<AllocElemType, THREAD_SAFE>
 {
 	sz size = AllocElemType::size * count;
 	return ((AllocElemType*)self.acquire(size, NO_ZERO)!!)[:count];
@@ -289,7 +293,7 @@ fn AllocElemType[] _alloc_array(ArenaAlloc{THREAD_SAFE}* self, sz count) <AllocE
 
 macro ArenaAlloc.new_array(&self, $Type, sz count) => _new_array{$Type, THREAD_SAFE}(self, count);
 
-fn AllocElemType[] _new_array(ArenaAlloc{THREAD_SAFE}* self, sz count) <AllocElemType, THREAD_SAFE>
+fn AllocElemType[] _new_array(ArenaAlloc{THREAD_SAFE}* self, sz count)<AllocElemType, THREAD_SAFE>
 {
 	sz size = AllocElemType::size * count;
 	return ((AllocElemType*)self.acquire(size, ZERO)!!)[:count];
@@ -298,9 +302,17 @@ fn AllocElemType[] _new_array(ArenaAlloc{THREAD_SAFE}* self, sz count) <AllocEle
 <*
  @require @kindof(old_slice) == SLICE : "Must be slice"
 *>
-macro ArenaAlloc.realloc_array(&self, old_slice, sz new_count) => _realloc_array{$Typeof(old_slice[0]), THREAD_SAFE}(self, old_slice, new_count);
+macro ArenaAlloc.realloc_array(
+	&self,
+	old_slice,
+	sz new_count
+) => _realloc_array{$Typeof(old_slice[0]), THREAD_SAFE}(self, old_slice, new_count);
 
-fn AllocElemType[] _realloc_array(ArenaAlloc{THREAD_SAFE}* self, AllocElemType[] old_slice, sz new_count) <AllocElemType, THREAD_SAFE>
+fn AllocElemType[] _realloc_array(
+	ArenaAlloc{THREAD_SAFE}* self,
+	AllocElemType[] old_slice,
+	sz new_count
+)<AllocElemType, THREAD_SAFE>
 {
 	sz new_size = AllocElemType::size * new_count;
 	return ((AllocElemType*)self.resize(old_slice.ptr, new_size)!!)[:new_count];
@@ -308,7 +320,7 @@ fn AllocElemType[] _realloc_array(ArenaAlloc{THREAD_SAFE}* self, AllocElemType[]
 
 macro ArenaAlloc.alloc_smart_array(&self, $Type, sz count) => _alloc_smart_array{$Type, THREAD_SAFE}(self, count);
 
-fn SmartSlice{AllocElemType} _alloc_smart_array(ArenaAlloc{THREAD_SAFE}* self, sz count) <AllocElemType, THREAD_SAFE>
+fn SmartSlice{AllocElemType} _alloc_smart_array(ArenaAlloc{THREAD_SAFE}* self, sz count)<AllocElemType, THREAD_SAFE>
 {
 	SmartSlice{AllocElemType} res @noinit;
 	sz size = AllocElemType::size * count;
@@ -319,7 +331,7 @@ fn SmartSlice{AllocElemType} _alloc_smart_array(ArenaAlloc{THREAD_SAFE}* self, s
 
 macro ArenaAlloc.new_smart_array(&self, $Type, sz count) => _new_smart_array{$Type, THREAD_SAFE}(self, count);
 
-fn SmartSlice{AllocElemType} _new_smart_array(ArenaAlloc{THREAD_SAFE}* self, sz count) <AllocElemType, THREAD_SAFE>
+fn SmartSlice{AllocElemType} _new_smart_array(ArenaAlloc{THREAD_SAFE}* self, sz count)<AllocElemType, THREAD_SAFE>
 {
 	SmartSlice{AllocElemType} res @noinit;
 	sz size = AllocElemType::size * count;
@@ -328,9 +340,17 @@ fn SmartSlice{AllocElemType} _new_smart_array(ArenaAlloc{THREAD_SAFE}* self, sz 
 	return res;
 }
 
-macro ArenaAlloc.realloc_smart_array(&self, old_arr, sz new_count) => _realloc_smart_array{$Typeof(old_arr.items[0]), THREAD_SAFE}(self, old_arr, new_count);
+macro ArenaAlloc.realloc_smart_array(
+	&self,
+	old_arr,
+	sz new_count
+) => _realloc_smart_array{$Typeof(old_arr.items[0]), THREAD_SAFE}(self, old_arr, new_count);
 
-fn SmartSlice{AllocElemType} _realloc_smart_array(ArenaAlloc{THREAD_SAFE}* self, SmartSlice{AllocElemType} old_arr, sz new_count) <AllocElemType, THREAD_SAFE>
+fn SmartSlice{AllocElemType} _realloc_smart_array(
+	ArenaAlloc{THREAD_SAFE}* self,
+	SmartSlice{AllocElemType} old_arr,
+	sz new_count
+)<AllocElemType, THREAD_SAFE>
 {
 	SmartSlice{AllocElemType} res @noinit;
 	sz new_size = AllocElemType::size * new_count;
@@ -371,7 +391,7 @@ fn void* ArenaAlloc.c_realloc(&self, void* ptr, sz new_size)
 
 macro ArenaAlloc.alloc(&self, $Type) => _alloc{$Type, THREAD_SAFE}(self);
 
-fn AllocType* _alloc(ArenaAlloc{THREAD_SAFE}* self) <AllocType, THREAD_SAFE> @local
+fn AllocType* _alloc(ArenaAlloc{THREAD_SAFE}* self)<AllocType, THREAD_SAFE> @local
 {
 	return self.acquire(AllocType::size, NO_ZERO)!!;
 }
@@ -381,7 +401,7 @@ fn AllocType* _alloc(ArenaAlloc{THREAD_SAFE}* self) <AllocType, THREAD_SAFE> @lo
 *>
 macro ArenaAlloc.clone(&self, val) => _clone{$Typeof(val), THREAD_SAFE}(self, val);
 
-fn CloneType* _clone(ArenaAlloc{THREAD_SAFE}* self, CloneType val) <CloneType, THREAD_SAFE> @local
+fn CloneType* _clone(ArenaAlloc{THREAD_SAFE}* self, CloneType val)<CloneType, THREAD_SAFE> @local
 {
 	CloneType* res = self.alloc(CloneType);
 	*res = val;
@@ -403,56 +423,56 @@ fn bool owns_ptr(ArenaAlloc* self, void* ptr) @inline @local
 *>
 fn sz remain_mem(ArenaAlloc* self, sz cursor) @inline @local
 {
-$if THREAD_SAFE:
-	return self.capacity.load() - cursor;
-$else
-	return self.capacity - self.cursor;
-$endif
+	$if THREAD_SAFE:
+		return self.capacity.load() - cursor;
+	$else
+		return self.capacity - self.cursor;
+	$endif
 }
 
 macro sz cursor(ArenaAlloc* self) @local
 {
-$if THREAD_SAFE:
-	return self.cursor.load();
-$else
-	return self.cursor;
-$endif
+	$if THREAD_SAFE:
+		return self.cursor.load();
+	$else
+		return self.cursor;
+	$endif
 }
 
 macro void set_cursor(ArenaAlloc* self, sz val) @local
 {
-$if THREAD_SAFE:
-	self.cursor.store(val);
-$else
-	self.cursor = val;
-$endif
+	$if THREAD_SAFE:
+		self.cursor.store(val);
+	$else
+		self.cursor = val;
+	$endif
 }
 
 macro capacity(ArenaAlloc* self) @local
 {
-$if THREAD_SAFE:
-	return self.capacity.load();
-$else
-	return self.capacity;
-$endif
+	$if THREAD_SAFE:
+		return self.capacity.load();
+	$else
+		return self.capacity;
+	$endif
 }
 
 macro void set_capacity(ArenaAlloc* self, sz val) @local
 {
-$if THREAD_SAFE:
-	self.capacity.store(val);
-$else
-	self.capacity = val;
-$endif
+	$if THREAD_SAFE:
+		self.capacity.store(val);
+	$else
+		self.capacity = val;
+	$endif
 }
 
 macro mark_count(ArenaAlloc* self) @local
 {
-$if THREAD_SAFE:
-	return self.mark_count.load();
-$else
-	return self.mark_count;
-$endif
+	$if THREAD_SAFE:
+		return self.mark_count.load();
+	$else
+		return self.mark_count;
+	$endif
 }
 
 <*
@@ -503,7 +523,7 @@ fn void*? make_fallback_allocation(ArenaAlloc* self, sz size, AllocInitType init
 *>
 fn void*? resize_fallback_allocation(ArenaAlloc* self, void* old_ptr, sz new_size) @local
 {
-	FallbackAlloc* curr = self.fallback_root;
+	FallbackAlloc* curr  = self.fallback_root;
 	FallbackAlloc* alloc = null;
 
 	while (curr)
@@ -516,7 +536,12 @@ fn void*? resize_fallback_allocation(ArenaAlloc* self, void* old_ptr, sz new_siz
 		curr = curr.next;
 	}
 
-	assert(alloc != null, "Pointer originates from a different allocator: %p, not in %p - %p", old_ptr, &self.memory, &self.memory + capacity(self));
+	assert(alloc
+		!= null, "Pointer originates from a different allocator: %p, not in %p - %p", old_ptr, &self
+			.memory, &self.memory
+			+ capacity(
+		self
+	));
 
 	alloc = alloc::realloc(self.backing_alloc, alloc, FallbackAlloc::size + new_size);
 	alloc.size = new_size;
@@ -544,7 +569,7 @@ fn void free_fallback_allocations(ArenaAlloc* self) @local
 *>
 fn sz calc_used_fallback_mem(ArenaAlloc* self) @local
 {
-	sz res = 0;
+	sz res              = 0;
 	FallbackAlloc* curr = self.fallback_root;
 	while (curr)
 	{
